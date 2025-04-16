@@ -3,47 +3,37 @@ name: Generate Release Notes
 on:
   push:
     branches:
-      - master
-      - release
-      - dev
+      - master # for customer-app
+      - dev # for customer-pwa dev
+      - release # for customer-app release
 
 jobs:
-  generate-release-notes:
-    name: Generate & Commit Release Notes
+  release-notes:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout Code
         uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GH_TOKEN }}
 
-      - name: Set up Git
+      - name: Get Commits
+        id: commits
+        uses: niteoweb/action-release-notes@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract ClickUp Tickets
+        id: clickup
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          echo "🧠 Extracting ClickUp URLs from commits..."
+          echo "${{ steps.commits.outputs.notes }}" | grep -Eo 'https:\/\/app.clickup.com\/t\/[a-zA-Z0-9]+' | sort | uniq > clickup_urls.txt
+          echo "📝 ClickUp URLs:"
+          cat clickup_urls.txt
 
-      - name: Get recent merged PRs
-        id: pr_list
-        uses: octokit/request-action@v2.x
+      - name: Post to Slack
+        uses: slackapi/slack-github-action@v1.24.0
         with:
-          route: GET /repos/${{ github.repository }}/pulls
-          parameters: |
-            state: closed
-            per_page: 20
+          payload: |
+            {
+              "text": "*🔔 Release Notification - ${{ github.ref_name }}* \n\n*ClickUp Tickets:* \n$(cat clickup_urls.txt | sed 's/^/- /' | paste -sd '\n')"
+            }
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate release notes content
-        id: generate_notes
-        run: |
-          echo "### Release Notes (branch: ${{ github.ref_name }})" > RELEASE_NOTES.md
-          echo "" >> RELEASE_NOTES.md
-
-          echo '${{ steps.pr_list.outputs.data }}' | jq -r '.[] | select(.merged_at != null) | "- [" + .title + "](" + .html_url + ")"' >> RELEASE_NOTES.md
-
-      - name: Commit release notes
-        run: |
-          git add RELEASE_NOTES.md
-          git commit -m "chore: update release notes"
-          git push
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_RELEASE_HOOK }}
