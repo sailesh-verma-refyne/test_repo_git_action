@@ -1,0 +1,53 @@
+name: Generate Release Notes
+
+on:
+  push:
+    branches:
+      - master # for customer-app
+      - dev # for customer-pwa
+      - release # for customer-app UAT
+
+jobs:
+  release-notes:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Get merged PRs for this push
+        id: changelog
+        run: |
+          echo "🔍 Collecting merged PRs..."
+          MERGED_PRS=$(git log -1 --pretty=format:"%H" | xargs -I {} git log {}^..{} --merges --pretty=format:"%s%n%b" | grep -Eo "https:\/\/app.clickup.com\/t\/[a-zA-Z0-9]+" | sort | uniq)
+          echo "Merged PRs with ClickUp URLs:"
+          echo "$MERGED_PRS"
+          echo "$MERGED_PRS" > clickup_urls.txt
+
+      - name: Create/Append Release Notes
+        run: |
+          echo "📝 Writing to RELEASE_NOTES.md"
+          TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+          BRANCH="${GITHUB_REF##*/}"
+
+          {
+            echo "## Release on branch \`$BRANCH\` - $TIMESTAMP"
+            echo ""
+            if [ -s clickup_urls.txt ]; then
+              while read -r url; do
+                echo "- $url"
+              done < clickup_urls.txt
+            else
+              echo "- No ClickUp links found in this release."
+            fi
+            echo ""
+          } >> RELEASE_NOTES.md
+
+      - name: Commit and push release notes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add RELEASE_NOTES.md
+          git commit -m "chore: update release notes for ${{ github.ref_name }}"
+          git push
