@@ -3,51 +3,47 @@ name: Generate Release Notes
 on:
   push:
     branches:
-      - master # for customer-app
-      - dev # for customer-pwa
-      - release # for customer-app UAT
+      - master
+      - release
+      - dev
 
 jobs:
-  release-notes:
+  generate-release-notes:
+    name: Generate & Commit Release Notes
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GH_TOKEN }}
 
-      - name: Get merged PRs for this push
-        id: changelog
+      - name: Set up Git
         run: |
-          echo "🔍 Collecting merged PRs..."
-          MERGED_PRS=$(git log -1 --pretty=format:"%H" | xargs -I {} git log {}^..{} --merges --pretty=format:"%s%n%b" | grep -Eo "https:\/\/app.clickup.com\/t\/[a-zA-Z0-9]+" | sort | uniq)
-          echo "Merged PRs with ClickUp URLs:"
-          echo "$MERGED_PRS"
-          echo "$MERGED_PRS" > clickup_urls.txt
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create/Append Release Notes
+      - name: Get recent merged PRs
+        id: pr_list
+        uses: octokit/request-action@v2.x
+        with:
+          route: GET /repos/${{ github.repository }}/pulls
+          parameters: |
+            state: closed
+            per_page: 20
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate release notes content
+        id: generate_notes
         run: |
-          echo "📝 Writing to RELEASE_NOTES.md"
-          TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-          BRANCH="${GITHUB_REF##*/}"
+          echo "### Release Notes (branch: ${{ github.ref_name }})" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
 
-          {
-            echo "## Release on branch \`$BRANCH\` - $TIMESTAMP"
-            echo ""
-            if [ -s clickup_urls.txt ]; then
-              while read -r url; do
-                echo "- $url"
-              done < clickup_urls.txt
-            else
-              echo "- No ClickUp links found in this release."
-            fi
-            echo ""
-          } >> RELEASE_NOTES.md
+          echo '${{ steps.pr_list.outputs.data }}' | jq -r '.[] | select(.merged_at != null) | "- [" + .title + "](" + .html_url + ")"' >> RELEASE_NOTES.md
 
-      - name: Commit and push release notes
+      - name: Commit release notes
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add RELEASE_NOTES.md
-          git commit -m "chore: update release notes for ${{ github.ref_name }}"
+          git commit -m "chore: update release notes"
           git push
