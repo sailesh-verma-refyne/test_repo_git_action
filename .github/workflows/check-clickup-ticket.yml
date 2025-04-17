@@ -1,21 +1,58 @@
-name: Validate PR Description
+name: Generate ClickUp Release Notes
 
 on:
   pull_request:
-    types: [opened, edited, reopened]
+    branches: [master]
+    types: [closed]
+  push:
+    branches: [uat]
 
 jobs:
-  validate-pr:
+  release-notes:
+    if: github.event.pull_request.merged == true || github.ref == 'refs/heads/uat'
     runs-on: ubuntu-latest
+
+    env:
+      CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+
     steps:
-      - name: Check for ClickUp Ticket
-        uses: actions/github-script@v6
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Fetch latest commits since last master merge
+        run: |
+          git fetch origin master
+          echo "### Commit Messages" > release_notes.txt
+          git log origin/master..HEAD --pretty=format:"- %s" > commits.txt
+          cat commits.txt >> release_notes.txt
+
+      - name: Extract ClickUp Task IDs and Fetch Titles
+        run: |
+          echo -e "\n### ClickUp Tasks" >> release_notes.txt
+
+          grep -oE 'CU-[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids.txt || true
+
+          while read cu_id; do
+            if [ -n "$cu_id" ]; then
+              echo "Fetching details for $cu_id..."
+              response=$(curl -s -H "Authorization: $CLICKUP_API_TOKEN" \
+                "https://api.clickup.com/api/v2/task/$cu_id")
+
+              title=$(echo "$response" | jq -r '.name // empty')
+
+              if [ -n "$title" ]; then
+                echo "- [$cu_id] $title" >> release_notes.txt
+              else
+                echo "- [$cu_id] (Title not found or invalid ID)" >> release_notes.txt
+              fi
+            fi
+          done < cu_ids.txt
+
+      - name: Output Release Notes
+        run: cat release_notes.txt
+
+      - name: Upload Release Notes Artifact
+        uses: actions/upload-artifact@v3
         with:
-          script: |
-            const prBody = context.payload.pull_request.body;
-            const regex = /https:\/\/app\.clickup\.com\/t\/[a-zA-Z0-9]+/;
-            if (!regex.test(prBody)) {
-              core.setFailed('❌ PR description must contain a ClickUp ticket URL.');
-            } else {
-              console.log('✅ ClickUp ticket found in PR description.');
-            }
+          name: release-notes
+          path: release_notes.txt
