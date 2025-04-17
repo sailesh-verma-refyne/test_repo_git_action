@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+    outputs:
+      release_notes: ${{ steps.set-output.outputs.content }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
@@ -73,10 +75,14 @@ jobs:
           fi
           
       - name: Output Release Notes
-        run: cat release_notes.txt
-        
-      - name: Upload Release Notes Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: release-notes
-          path: release_notes.txt
+        id: set-output
+        run: |
+          echo "Release Notes Content:"
+          cat release_notes.txt
+          
+          # Store release notes as workflow output for other jobs
+          content=$(cat release_notes.txt)
+          # Convert newlines to handle multi-line content in outputs
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          echo "$content" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
