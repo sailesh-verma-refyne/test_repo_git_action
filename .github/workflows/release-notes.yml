@@ -16,8 +16,8 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0 # Fetch all history for all branches and tags
-
+          fetch-depth: 0  # Fetch all history for all branches and tags
+          
       - name: Generate release notes for master
         if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat'
         run: |
@@ -25,7 +25,7 @@ jobs:
           echo -e "\n### Commit Messages" >> release_notes.txt
           git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"- %s" > commits.txt
           cat commits.txt >> release_notes.txt
-
+          
       - name: Generate release notes for uat
         if: github.ref == 'refs/heads/uat'
         run: |
@@ -34,14 +34,14 @@ jobs:
           # Find the common ancestor between current uat and master
           git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"- %s" > commits.txt
           cat commits.txt >> release_notes.txt
-
+          
       - name: Extract ClickUp Task IDs and Fetch Titles
         run: |
           echo -e "\n### ClickUp Tasks" >> release_notes.txt
-
+          
           # Extract CU IDs with improved pattern matching
           grep -oE 'CU-[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids.txt || true
-
+          
           # Check if we found any ClickUp tasks
           if [ -s cu_ids.txt ]; then
             while read cu_id; do
@@ -71,12 +71,12 @@ jobs:
           else
             echo "- No ClickUp tasks found in commits" >> release_notes.txt
           fi
-
+          
       - name: Output Release Notes
         run: cat release_notes.txt
-
+        
       - name: Upload Release Notes Artifact
-        uses: actions/upload-artifact@v3.1.3
+        uses: actions/upload-artifact@v3
         with:
           name: release-notes
           path: release_notes.txt
