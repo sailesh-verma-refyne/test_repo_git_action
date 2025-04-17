@@ -12,28 +12,27 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+    outputs:
+      release_notes: ${{ steps.set-output.outputs.content }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0 # Fetch all history for all branches and tags
 
-      - name: Generate release notes for master
+      - name: Generate release notes header
         if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat'
         run: |
-          echo "### Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          echo -e "\n### Commit Messages" >> release_notes.txt
-          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"- %s" > commits.txt
-          cat commits.txt >> release_notes.txt
+          echo "### Master Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
+          # Still need to generate commits.txt for ClickUp ID extraction, but we won't include it in the release notes
+          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
 
-      - name: Generate release notes for uat
+      - name: Generate release notes header for uat
         if: github.ref == 'refs/heads/uat'
         run: |
           echo "### UAT Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          echo -e "\n### Commit Messages" >> release_notes.txt
-          # Find the common ancestor between current uat and master
-          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"- %s" > commits.txt
-          cat commits.txt >> release_notes.txt
+          # Still generate commits.txt but don't add to release notes
+          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
 
       - name: Extract ClickUp Task IDs and Fetch Titles
         run: |
@@ -73,10 +72,14 @@ jobs:
           fi
 
       - name: Output Release Notes
-        run: cat release_notes.txt
+        id: set-output
+        run: |
+          echo "Release Notes Content:"
+          cat release_notes.txt
 
-      - name: Upload Release Notes Artifact
-        uses: actions/upload-artifact@v3.1.3
-        with:
-          name: release-notes
-          path: release_notes.txt
+          # Store release notes as workflow output for other jobs
+          content=$(cat release_notes.txt)
+          # Convert newlines to handle multi-line content in outputs
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          echo "$content" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
