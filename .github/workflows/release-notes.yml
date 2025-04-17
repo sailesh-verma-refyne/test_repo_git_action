@@ -20,22 +20,19 @@ jobs:
         with:
           fetch-depth: 0  # Fetch all history for all branches and tags
           
-      - name: Generate release notes for master
+      - name: Generate release notes header
         if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat'
         run: |
-          echo "### Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          echo -e "\n### Commit Messages" >> release_notes.txt
-          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"- %s" > commits.txt
-          cat commits.txt >> release_notes.txt
+          echo "### Master Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
+          # Still need to generate commits.txt for ClickUp ID extraction, but we won't include it in the release notes
+          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
           
-      - name: Generate release notes for uat
+      - name: Generate release notes header for uat
         if: github.ref == 'refs/heads/uat'
         run: |
           echo "### UAT Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          echo -e "\n### Commit Messages" >> release_notes.txt
-          # Find the common ancestor between current uat and master
-          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"- %s" > commits.txt
-          cat commits.txt >> release_notes.txt
+          # Still generate commits.txt but don't add to release notes
+          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
           
       - name: Extract ClickUp Task IDs and Fetch Titles
         run: |
