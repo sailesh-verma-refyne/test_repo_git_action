@@ -1,54 +1,63 @@
 name: Generate ClickUp Release Notes
+
 on:
   pull_request:
-    branches: [master, uat]
+    branches: [master, uat, release, dev]
     types: [opened, synchronize, reopened, closed]
   push:
-    branches: [uat]
+    branches: [uat, master, release, dev]
 
 jobs:
   release-notes:
-    if:
-      (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'uat') ||
-      github.ref == 'refs/heads/uat' ||
-      (github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened'))
+    if: |
+      (github.event.pull_request.merged == true) ||
+      (github.ref == 'refs/heads/uat') ||
+      (github.ref == 'refs/heads/dev') ||
+      (github.ref == 'refs/heads/release') ||
+      (github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     env:
       CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
-    outputs:
-      release_notes: ${{ steps.set-output.outputs.content }}
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Generate release notes for merged PR
-        if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'uat'
+      - name: Install GitHub CLI
+        run: sudo apt install gh -y
+
+      - name: Authenticate GH CLI
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
+
+      - name: Init release notes file
         run: |
-          echo "### UAT Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          # Only use PR description to extract ClickUp tasks
+          echo "### Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
+
+      - name: Generate commits and extract PR description (for push events)
+        if: startsWith(github.ref, 'refs/heads/')
+        run: |
+          LAST_COMMIT=$(git rev-parse HEAD)
+
+          echo "Fetching PR for commit: $LAST_COMMIT"
+          PR_DATA=$(gh pr list --search "$LAST_COMMIT" --state merged --json number,body --limit 1)
+          PR_BODY=$(echo "$PR_DATA" | jq -r '.[0].body // ""')
+
+          echo "$PR_BODY" > commits.txt
+
+      - name: Generate commits and extract PR description (for PR events)
+        if: github.event_name == 'pull_request'
+        run: |
           echo "${{ github.event.pull_request.body }}" > commits.txt
-
-      - name: Generate release notes for uat push
-        if: github.ref == 'refs/heads/uat'
-        run: |
-          echo "### UAT Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
-
-      - name: Generate release notes for new/updated PR
-        if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened')
-        run: |
-          echo "### PR Review Notes - #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }} ($(date +%Y-%m-%d))" > release_notes.txt
-          echo -e "\nPR from: ${{ github.event.pull_request.head.ref }} to: ${{ github.event.pull_request.base.ref }}" >> release_notes.txt
-          git fetch origin ${{ github.event.pull_request.base.ref }}
-          git log origin/${{ github.event.pull_request.base.ref }}..HEAD --pretty=format:"%s" > commits.txt
-          echo "${{ github.event.pull_request.body }}" >> commits.txt
 
       - name: Extract ClickUp Task IDs and Fetch Titles
         run: |
           echo -e "\n### ClickUp Tasks" >> release_notes.txt
+
+          # Extract CU- links and ClickUp URLs
           grep -oE 'CU-[a-zA-Z0-9]+|https://app.clickup.com/t/[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids_raw.txt || true
+          
+          # Normalize to task IDs
           > cu_ids.txt
           if [ -s cu_ids_raw.txt ]; then
             while read raw_id; do
@@ -62,41 +71,30 @@ jobs:
             done < cu_ids_raw.txt
           fi
 
+          # Query ClickUp API for each task ID
           if [ -s cu_ids.txt ]; then
             while read task_id; do
               if [ -n "$task_id" ]; then
-                echo "Fetching details for task_id: $task_id..."
+                echo "Fetching task $task_id..."
+
                 response=$(curl -s -H "Authorization: $CLICKUP_API_TOKEN" \
                   "https://api.clickup.com/api/v2/task/$task_id")
+
                 error=$(echo "$response" | jq -r '.err // empty')
                 if [ -n "$error" ]; then
                   echo "- [Task: $task_id] (API Error: $error)" >> release_notes.txt
                 else
                   title=$(echo "$response" | jq -r '.name // "No title found"')
                   status=$(echo "$response" | jq -r '.status.status // "Unknown status"')
-                  if [[ "$github.event_name" == "pull_request" && "$github.event.action" != "closed" ]]; then
-                    assignee=$(echo "$response" | jq -r '.assignees[0].username // "Unassigned"')
-                    due_date=$(echo "$response" | jq -r '.due_date // "No due date"')
-                    if [[ "$due_date" != "No due date" && "$due_date" != "null" ]]; then
-                      due_date=$(date -d @$((due_date/1000)) "+%Y-%m-%d")
-                    fi
-                    echo "- [Task: $task_id] $title (Status: $status, Assignee: $assignee, Due: $due_date)" >> release_notes.txt
-                  else
-                    echo "- [Task: $task_id] $title (Status: $status)" >> release_notes.txt
-                  fi
+                  echo "- [Task: $task_id] $title (Status: $status)" >> release_notes.txt
                 fi
               fi
             done < cu_ids.txt
           else
-            echo "- No ClickUp tasks found in PR description or commits" >> release_notes.txt
+            echo "- No ClickUp tasks found in PR description or commit metadata" >> release_notes.txt
           fi
 
       - name: Output Release Notes
-        id: set-output
         run: |
           echo "Release Notes Content:"
           cat release_notes.txt
-          content=$(cat release_notes.txt)
-          echo "content<<EOF" >> $GITHUB_OUTPUT
-          echo "$content" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
