@@ -6,7 +6,7 @@ on:
 
 jobs:
   validate-pr:
-    if: github.base_ref == 'uat'  # ✅ Only run if PR targets 'uat'
+    if: github.event.pull_request.base.ref == 'uat'  # ✅ Only run if the PR is targeting 'uat'
     runs-on: ubuntu-latest
     steps:
       - name: Check for ClickUp Ticket
