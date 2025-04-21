@@ -32,6 +32,9 @@ jobs:
           # Still need to generate commits.txt for ClickUp ID extraction
           git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
           
+          # Also include PR description for merged PRs to catch any ClickUp links there
+          echo "${{ github.event.pull_request.body }}" >> commits.txt
+          
       - name: Generate release notes for uat push
         if: github.ref == 'refs/heads/uat'
         run: |
@@ -49,23 +52,38 @@ jobs:
           git fetch origin ${{ github.event.pull_request.base.ref }}
           git log origin/${{ github.event.pull_request.base.ref }}..HEAD --pretty=format:"%s" > commits.txt
           
+          # Also include PR description to catch any ClickUp links there
+          echo "${{ github.event.pull_request.body }}" >> commits.txt
+          
       - name: Extract ClickUp Task IDs and Fetch Titles
         run: |
           echo -e "\n### ClickUp Tasks" >> release_notes.txt
           
-          # Extract CU IDs with improved pattern matching
-          grep -oE 'CU-[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids.txt || true
+          # Extract both CU- format IDs and ClickUp URLs
+          grep -oE 'CU-[a-zA-Z0-9]+|https://app.clickup.com/t/[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids_raw.txt || true
+          
+          # Process the IDs to extract just the task ID portion
+          > cu_ids.txt  # Create empty file
+          if [ -s cu_ids_raw.txt ]; then
+            while read raw_id; do
+              if [[ $raw_id == https://app.clickup.com/t/* ]]; then
+                # Extract just the ID from the end of the URL
+                echo "${raw_id##*/}" >> cu_ids.txt
+              elif [[ $raw_id == CU-* ]]; then
+                # For CU-format IDs, extract just the ID after the prefix
+                echo "${raw_id#CU-}" >> cu_ids.txt
+              else
+                # Otherwise, use as is
+                echo "$raw_id" >> cu_ids.txt
+              fi
+            done < cu_ids_raw.txt
+          fi
           
           # Check if we found any ClickUp tasks
           if [ -s cu_ids.txt ]; then
-            while read cu_id; do
-              if [ -n "$cu_id" ]; then
-                echo "Fetching details for $cu_id..."
-                # Remove any trailing whitespace or special chars
-                clean_id=$(echo "$cu_id" | tr -d '[:space:]' | sed 's/[^a-zA-Z0-9-]//g')
-                
-                # Extract actual task ID (removing CU- prefix)
-                task_id="${clean_id#CU-}"
+            while read task_id; do
+              if [ -n "$task_id" ]; then
+                echo "Fetching details for task_id: $task_id..."
                 
                 # Call ClickUp API with proper error handling
                 response=$(curl -s -H "Authorization: $CLICKUP_API_TOKEN" \
@@ -74,7 +92,7 @@ jobs:
                 # Check if response contains error
                 error=$(echo "$response" | jq -r '.err // empty')
                 if [ -n "$error" ]; then
-                  echo "- [$clean_id] (API Error: $error)" >> release_notes.txt
+                  echo "- [Task: $task_id] (API Error: $error)" >> release_notes.txt
                 else
                   title=$(echo "$response" | jq -r '.name // "No title found"')
                   status=$(echo "$response" | jq -r '.status.status // "Unknown status"')
@@ -86,15 +104,15 @@ jobs:
                     if [[ "$due_date" != "No due date" && "$due_date" != "null" ]]; then
                       due_date=$(date -d @$((due_date/1000)) "+%Y-%m-%d")
                     fi
-                    echo "- [$clean_id] $title (Status: $status, Assignee: $assignee, Due: $due_date)" >> release_notes.txt
+                    echo "- [Task: $task_id] $title (Status: $status, Assignee: $assignee, Due: $due_date)" >> release_notes.txt
                   else
-                    echo "- [$clean_id] $title (Status: $status)" >> release_notes.txt
+                    echo "- [Task: $task_id] $title (Status: $status)" >> release_notes.txt
                   fi
                 fi
               fi
             done < cu_ids.txt
           else
-            echo "- No ClickUp tasks found in commits" >> release_notes.txt
+            echo "- No ClickUp tasks found in commits or PR description" >> release_notes.txt
           fi
           
       - name: Output Release Notes
