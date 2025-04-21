@@ -1,67 +1,42 @@
 name: Generate ClickUp Release Notes
-
 on:
-  pull_request:
-    branches: [master, uat, release, dev]
-    types: [closed]
   push:
-    branches: [uat, master, release, dev]
+    branches: [uat, dev, release, master]
 
 jobs:
   release-notes:
-    if: |
-      github.event.pull_request.merged == true ||
-      github.event_name == 'push'
+    if: github.ref == 'refs/heads/uat' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/release' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     env:
       CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
-
     steps:
-      - name: Checkout Code
+      - name: Checkout full history
         uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Install gh CLI
-        run: sudo apt-get install gh -y
+      - name: Fetch all branches
+        run: |
+          git fetch --all
 
-      - name: Auth GitHub CLI
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
-
-      - name: Get PR Body (Push Events)
-        if: github.event_name == 'push'
+      - name: Determine commits since last master merge
         run: |
           echo "### Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
 
-          # Get last commit SHA
-          LAST_COMMIT=$(git log -1 --pretty=format:"%H")
-          echo "Last Commit: $LAST_COMMIT"
+          # Find common ancestor (last merge base) between master and current branch
+          BASE=$(git merge-base origin/master HEAD)
+          echo "Base commit between origin/master and HEAD is $BASE"
+          
+          # Get all commit messages since that base
+          git log $BASE..HEAD --pretty=format:"%s" > commits.txt
 
-          # Get associated PR number via GitHub API
-          PR_URL=$(gh api \
-            -H "Accept: application/vnd.github.groot-preview+json" \
-            /repos/${{ github.repository }}/commits/$LAST_COMMIT/pulls \
-            --jq '.[0].url')
-
-          if [ -z "$PR_URL" ]; then
-            echo "❌ No PR found for commit. Exiting." >> release_notes.txt
-            exit 0
-          fi
-
-          PR_BODY=$(gh api "$PR_URL" --jq '.body')
-          echo "$PR_BODY" > commits.txt
-
-      - name: Get PR Body (PR Events)
-        if: github.event_name == 'pull_request'
-        run: |
-          echo "### Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          echo "${{ github.event.pull_request.body }}" > commits.txt
+          echo "Collected commits:"
+          cat commits.txt
 
       - name: Extract ClickUp Task IDs and Fetch Titles
         run: |
           echo -e "\n### ClickUp Tasks" >> release_notes.txt
 
-          # Extract ClickUp links
           grep -oE 'CU-[a-zA-Z0-9]+|https://app.clickup.com/t/[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids_raw.txt || true
 
           > cu_ids.txt
@@ -75,24 +50,25 @@ jobs:
             done < cu_ids_raw.txt
           fi
 
-          # Query ClickUp API
           if [ -s cu_ids.txt ]; then
             while read task_id; do
-              if [ -n "$task_id" ]; then
-                response=$(curl -s -H "Authorization: $CLICKUP_API_TOKEN" \
-                  "https://api.clickup.com/api/v2/task/$task_id")
-
+              response=$(curl -s -H "Authorization: $CLICKUP_API_TOKEN" \
+                "https://api.clickup.com/api/v2/task/$task_id")
+              
+              error=$(echo "$response" | jq -r '.err // empty')
+              if [ -n "$error" ]; then
+                echo "- [Task: $task_id] (API Error: $error)" >> release_notes.txt
+              else
                 title=$(echo "$response" | jq -r '.name // "No title found"')
-                status=$(echo "$response" | jq -r '.status.status // "Unknown"')
-
+                status=$(echo "$response" | jq -r '.status.status // "Unknown status"')
                 echo "- [Task: $task_id] $title (Status: $status)" >> release_notes.txt
               fi
             done < cu_ids.txt
           else
-            echo "- No ClickUp tasks found in PR description or commits" >> release_notes.txt
+            echo "- No ClickUp tasks found in PR description or commit metadata" >> release_notes.txt
           fi
 
-      - name: Output Notes
+      - name: Output Release Notes
         run: |
           echo "Release Notes Content:"
           cat release_notes.txt
