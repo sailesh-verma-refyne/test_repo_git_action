@@ -12,6 +12,7 @@ jobs:
   generate-release-notes:
     runs-on: ubuntu-latest
     env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
 
     steps:
