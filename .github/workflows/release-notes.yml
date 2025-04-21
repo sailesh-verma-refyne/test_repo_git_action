@@ -1,14 +1,19 @@
 name: Generate ClickUp Release Notes
 on:
   pull_request:
-    branches: [master]
-    types: [closed]
+    branches: [master, uat]
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [uat]
 jobs:
   release-notes:
-    # Only run if the PR was merged into master from uat, or if it's a push to uat
-    if: (github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat') || github.ref == 'refs/heads/uat'
+    # Run in these scenarios:
+    # 1. When a PR is closed (merged) from uat to master
+    # 2. When code is pushed to uat branch
+    # 3. When a new PR is opened or updated against master or uat
+    if: (github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat') || 
+        github.ref == 'refs/heads/uat' || 
+        (github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened'))
     runs-on: ubuntu-latest
     env:
       CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
@@ -18,29 +23,39 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0 # Fetch all history for all branches and tags
-
-      - name: Generate release notes header
+          fetch-depth: 0  # Fetch all history for all branches and tags
+          
+      - name: Generate release notes for merged PR
         if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat'
         run: |
           echo "### Master Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          # Still need to generate commits.txt for ClickUp ID extraction, but we won't include it in the release notes
+          # Still need to generate commits.txt for ClickUp ID extraction
           git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
-
-      - name: Generate release notes header for uat
+          
+      - name: Generate release notes for uat push
         if: github.ref == 'refs/heads/uat'
         run: |
           echo "### UAT Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          # Still generate commits.txt but don't add to release notes
+          # Generate commits.txt
           git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
-
+          
+      - name: Generate release notes for new/updated PR
+        if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened')
+        run: |
+          echo "### PR Review Notes - #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }} ($(date +%Y-%m-%d))" > release_notes.txt
+          echo -e "\nPR from: ${{ github.event.pull_request.head.ref }} to: ${{ github.event.pull_request.base.ref }}" >> release_notes.txt
+          
+          # For PRs, compare the source branch against the target branch
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git log origin/${{ github.event.pull_request.base.ref }}..HEAD --pretty=format:"%s" > commits.txt
+          
       - name: Extract ClickUp Task IDs and Fetch Titles
         run: |
           echo -e "\n### ClickUp Tasks" >> release_notes.txt
-
+          
           # Extract CU IDs with improved pattern matching
           grep -oE 'CU-[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids.txt || true
-
+          
           # Check if we found any ClickUp tasks
           if [ -s cu_ids.txt ]; then
             while read cu_id; do
@@ -63,20 +78,31 @@ jobs:
                 else
                   title=$(echo "$response" | jq -r '.name // "No title found"')
                   status=$(echo "$response" | jq -r '.status.status // "Unknown status"')
-                  echo "- [$clean_id] $title (Status: $status)" >> release_notes.txt
+                  
+                  # Add more details for PR reviews
+                  if [[ "$github.event_name" == "pull_request" && "$github.event.action" != "closed" ]]; then
+                    assignee=$(echo "$response" | jq -r '.assignees[0].username // "Unassigned"')
+                    due_date=$(echo "$response" | jq -r '.due_date // "No due date"')
+                    if [[ "$due_date" != "No due date" && "$due_date" != "null" ]]; then
+                      due_date=$(date -d @$((due_date/1000)) "+%Y-%m-%d")
+                    fi
+                    echo "- [$clean_id] $title (Status: $status, Assignee: $assignee, Due: $due_date)" >> release_notes.txt
+                  else
+                    echo "- [$clean_id] $title (Status: $status)" >> release_notes.txt
+                  fi
                 fi
               fi
             done < cu_ids.txt
           else
             echo "- No ClickUp tasks found in commits" >> release_notes.txt
           fi
-
+          
       - name: Output Release Notes
         id: set-output
         run: |
           echo "Release Notes Content:"
           cat release_notes.txt
-
+          
           # Store release notes as workflow output for other jobs
           content=$(cat release_notes.txt)
           # Convert newlines to handle multi-line content in outputs
