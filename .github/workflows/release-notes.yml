@@ -1,85 +1,105 @@
 name: Generate ClickUp Release Notes
+
 on:
-  pull_request:
-    branches: [master]
-    types: [closed]
   push:
-    branches: [uat]
+    branches:
+      - uat
+      - dev
+      - release
+      - master
+
 jobs:
-  release-notes:
-    # Only run if the PR was merged into master from uat, or if it's a push to uat
-    if: (github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat') || github.ref == 'refs/heads/uat'
+  generate-release-notes:
     runs-on: ubuntu-latest
     env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
-    outputs:
-      release_notes: ${{ steps.set-output.outputs.content }}
+
     steps:
-      - name: Checkout Code
+      - name: Checkout full history
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0 # Fetch all history for all branches and tags
+          fetch-depth: 0
 
-      - name: Generate release notes header
-        if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'uat'
-        run: |
-          echo "### Master Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          # Still need to generate commits.txt for ClickUp ID extraction, but we won't include it in the release notes
-          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
+      - name: Set up jq
+        run: sudo apt-get install jq
 
-      - name: Generate release notes header for uat
-        if: github.ref == 'refs/heads/uat'
+      - name: Get merged PRs into this branch since last master merge
+        id: fetch_prs
         run: |
-          echo "### UAT Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
-          # Still generate commits.txt but don't add to release notes
-          git log $(git merge-base origin/master HEAD)..HEAD --pretty=format:"%s" > commits.txt
-
-      - name: Extract ClickUp Task IDs and Fetch Titles
-        run: |
+          echo "### Release Notes ($(date +%Y-%m-%d))" > release_notes.txt
           echo -e "\n### ClickUp Tasks" >> release_notes.txt
 
-          # Extract CU IDs with improved pattern matching
-          grep -oE 'CU-[a-zA-Z0-9]+' commits.txt | sort -u > cu_ids.txt || true
+          BASE_BRANCH="master"
+          TARGET_BRANCH=$(echo "${GITHUB_REF##*/}")
+          echo "Comparing $BASE_BRANCH..$TARGET_BRANCH"
 
-          # Check if we found any ClickUp tasks
-          if [ -s cu_ids.txt ]; then
-            while read cu_id; do
-              if [ -n "$cu_id" ]; then
-                echo "Fetching details for $cu_id..."
-                # Remove any trailing whitespace or special chars
-                clean_id=$(echo "$cu_id" | tr -d '[:space:]' | sed 's/[^a-zA-Z0-9-]//g')
-                
-                # Extract actual task ID (removing CU- prefix)
-                task_id="${clean_id#CU-}"
-                
-                # Call ClickUp API with proper error handling
-                response=$(curl -s -H "Authorization: $CLICKUP_API_TOKEN" \
-                  "https://api.clickup.com/api/v2/task/$task_id")
-                
-                # Check if response contains error
-                error=$(echo "$response" | jq -r '.err // empty')
-                if [ -n "$error" ]; then
-                  echo "- [$clean_id] (API Error: $error)" >> release_notes.txt
-                else
-                  title=$(echo "$response" | jq -r '.name // "No title found"')
-                  status=$(echo "$response" | jq -r '.status.status // "Unknown status"')
-                  echo "- [$clean_id] $title (Status: $status)" >> release_notes.txt
-                fi
+          git fetch origin $BASE_BRANCH
+
+          # Get all commits unique to this branch (since diverging from master)
+          git log origin/$BASE_BRANCH..HEAD --pretty=format:"%H" > commit_shas.txt
+
+          # Use GH CLI to find PRs associated with these commits
+          echo "" > cu_ids.txt
+
+          while read sha; do
+            prs=$(gh pr list --search "$sha" --state merged --json number,title,body,url --jq '.[]')
+            if [[ -n "$prs" ]]; then
+              echo "$prs" | jq -c '.' >> prs_data.jsonl
+            fi
+          done < commit_shas.txt
+
+          if [ ! -s prs_data.jsonl ]; then
+            echo "- No merged PRs found." >> release_notes.txt
+            exit 0
+          fi
+
+          cat prs_data.jsonl | while read pr; do
+            pr_title=$(echo "$pr" | jq -r '.title')
+            pr_body=$(echo "$pr" | jq -r '.body')
+            pr_url=$(echo "$pr" | jq -r '.url')
+            echo -e "\n**$pr_title**\n$pr_url" >> release_notes.txt
+
+            # Extract ClickUp Task IDs from PR body
+            echo "$pr_body" | grep -oE 'CU-[a-zA-Z0-9]+|https://app.clickup.com/t/[a-zA-Z0-9]+' | sort -u >> cu_ids.txt || true
+          done
+
+          # Remove duplicates
+          sort -u cu_ids.txt -o cu_ids.txt
+
+      - name: Fetch ClickUp Task Info
+        if: success()
+        run: |
+          if [ ! -s cu_ids.txt ]; then
+            echo "- No ClickUp tasks found in PR descriptions" >> release_notes.txt
+          else
+            while read id; do
+              # Normalize ClickUp task ID
+              if [[ $id == https://app.clickup.com/t/* ]]; then
+                task_id="${id##*/}"
+              elif [[ $id == CU-* ]]; then
+                task_id="${id#CU-}"
+              else
+                task_id="$id"
+              fi
+
+              echo "Fetching task $task_id..."
+              response=$(curl -s -H "Authorization: $CLICKUP_API_TOKEN" \
+                "https://api.clickup.com/api/v2/task/$task_id")
+
+              title=$(echo "$response" | jq -r '.name // "No title found"')
+              status=$(echo "$response" | jq -r '.status.status // "Unknown status"')
+
+              if [[ "$title" != "null" ]]; then
+                echo "- [$task_id] $title (Status: $status)" >> release_notes.txt
+              else
+                echo "- [$task_id] (Unable to fetch details)" >> release_notes.txt
               fi
             done < cu_ids.txt
-          else
-            echo "- No ClickUp tasks found in commits" >> release_notes.txt
           fi
 
       - name: Output Release Notes
-        id: set-output
         run: |
           echo "Release Notes Content:"
+          echo "------------------------"
           cat release_notes.txt
-
-          # Store release notes as workflow output for other jobs
-          content=$(cat release_notes.txt)
-          # Convert newlines to handle multi-line content in outputs
-          echo "content<<EOF" >> $GITHUB_OUTPUT
-          echo "$content" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
