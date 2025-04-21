@@ -6,13 +6,14 @@ on:
 
 jobs:
   validate-pr:
+    if: github.event.pull_request.base.ref == 'uat'  # ✅ Only run if the PR is targeting 'uat'
     runs-on: ubuntu-latest
     steps:
       - name: Check for ClickUp Ticket
         uses: actions/github-script@v6
         with:
           script: |
-            const prBody = context.payload.pull_request.body;
+            const prBody = context.payload.pull_request.body || "";
             const regex = /https:\/\/app\.clickup\.com\/t\/[a-zA-Z0-9]+/;
             if (!regex.test(prBody)) {
               core.setFailed('❌ PR description must contain a ClickUp ticket URL.');
